@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>住宅ローン金利トラッカー</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1f2933; --sub:#6b7684;
+    --line:#e3e8ee; --hendo:#e8590c; --flat:#1c7ed6;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:"Segoe UI","Hiragino Kaku Gothic ProN","Meiryo",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1000px; margin:0 auto; padding:28px 20px 60px;}
+  header h1{font-size:22px; margin:0 0 4px;}
+  header .meta{color:var(--sub); font-size:13px;}
+
+  .cards{display:flex; gap:16px; margin:22px 0; flex-wrap:wrap;}
+  .card{
+    flex:1 1 220px; background:var(--card); border:1px solid var(--line);
+    border-radius:14px; padding:18px 20px; box-shadow:0 1px 2px rgba(0,0,0,.03);
+  }
+  .card .name{font-size:13px; color:var(--sub); display:flex; align-items:center; gap:8px;}
+  .card .dot{width:10px; height:10px; border-radius:50%;}
+  .card .val{font-size:34px; font-weight:700; margin:6px 0 2px; letter-spacing:-.5px;}
+  .card .val small{font-size:16px; font-weight:600; color:var(--sub); margin-left:2px;}
+  .card .asof{font-size:12px; color:var(--sub);}
+  .card .chg{font-size:12px; margin-top:6px;}
+  .chg.up{color:#c92a2a;} .chg.down{color:#2b8a3e;} .chg.flat{color:var(--sub);}
+
+  .panel{
+    background:var(--card); border:1px solid var(--line); border-radius:14px;
+    padding:18px 20px 22px; box-shadow:0 1px 2px rgba(0,0,0,.03);
+  }
+  .controls{display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; align-items:center;}
+  .controls .spacer{flex:1;}
+  button.range{
+    border:1px solid var(--line); background:#fff; color:var(--ink);
+    padding:6px 14px; border-radius:999px; font-size:13px; cursor:pointer;
+  }
+  button.range.active{background:var(--ink); color:#fff; border-color:var(--ink);}
+  .toggle{display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--sub); cursor:pointer;}
+  .chartbox{position:relative; height:420px;}
+
+  .notes{margin-top:22px; font-size:12.5px; color:var(--sub); line-height:1.7;}
+  .notes b{color:var(--ink);}
+  .notes a{color:var(--flat); text-decoration:none;}
+  .notes a:hover{text-decoration:underline;}
+  .status{margin-top:10px; font-size:12px; color:var(--sub);}
+  .status code{background:#eef1f5; padding:1px 6px; border-radius:5px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🏠 住宅ローン金利トラッカー</h1>
+    <div class="meta" id="updated"></div>
+  </header>
+
+  <section class="cards" id="cards"></section>
+
+  <section class="panel">
+    <div class="controls">
+      <span style="font-size:13px;color:var(--sub)">表示期間</span>
+      <button class="range" data-years="3">3年</button>
+      <button class="range" data-years="5">5年</button>
+      <button class="range" data-years="10">10年</button>
+      <button class="range active" data-years="0">全期間</button>
+      <span class="spacer"></span>
+      <label class="toggle"><input type="checkbox" id="tg-hendo" checked> 変動</label>
+      <label class="toggle"><input type="checkbox" id="tg-flat" checked> フラット35</label>
+    </div>
+    <div class="chartbox"><canvas id="chart"></canvas></div>
+  </section>
+
+  <div class="notes" id="notes"></div>
+  <div class="status" id="status"></div>
+</div>
+
+<script src="vendor/chart.umd.min.js"></script>
+<script src="data/history.js"></script>
+<script>
+const D = window.RATE_DATA;
+if(!D){ document.getElementById('cards').innerHTML =
+  '<div class="card">データがありません。<br>「更新して開く.bat」を実行してください。</div>'; }
+
+function lastNonNull(arr){ for(let i=arr.length-1;i>=0;i--) if(arr[i]!=null) return {i, v:arr[i]}; return null; }
+function prevChange(arr, idx){ // 直近で値が変わった1つ前の値
+  const cur=arr[idx]; for(let i=idx-1;i>=0;i--){ if(arr[i]!=null && arr[i]!==cur) return arr[i]; } return null;
+}
+
+// ---- カード(最新値) ----
+if(D){
+  document.getElementById('updated').textContent =
+    '最終更新: ' + (D.generated_at||'').replace('T',' ');
+  const cards = D.series.map(s=>{
+    const ln = lastNonNull(s.data); if(!ln) return '';
+    const asof = D.labels[ln.i];
+    const prev = prevChange(s.data, ln.i);
+    let chg='<span class="chg flat">— 横ばい</span>';
+    if(prev!=null){
+      const diff=+(ln.v-prev).toFixed(3);
+      const cls=diff>0?'up':(diff<0?'down':'flat');
+      const ar=diff>0?'▲':(diff<0?'▼':'—');
+      chg=`<span class="chg ${cls}">${ar} 前回比 ${diff>0?'+':''}${diff}%(前 ${prev}%)</span>`;
+    }
+    return `<div class="card">
+      <div class="name"><span class="dot" style="background:${s.color}"></span>${s.label}</div>
+      <div class="val" style="color:${s.color}">${ln.v.toFixed(3)}<small>%</small></div>
+      <div class="asof">${asof} 時点</div>${chg}</div>`;
+  }).join('');
+  document.getElementById('cards').innerHTML = cards;
+
+  // ---- 注記 ----
+  document.getElementById('notes').innerHTML =
+    D.series.map(s=>`<div>● <b>${s.label}</b> … 出典: ${s.source}<br>
+      <span style="padding-left:14px">${s.note} `+
+      (s.url?`<a href="${s.url}" target="_blank">[ソースを開く]</a>`:'')+`</span></div>`).join('')
+    + `<div style="margin-top:8px">※ 変動金利は「短期プライムレート連動の店頭金利」を描画しています。`
+    + `実際に借りられる金利は各銀行の優遇幅により、これより低くなります(目安: 店頭 − 約1.5〜2.0%)。</div>`;
+  document.getElementById('status').innerHTML =
+    Object.entries(D.status||{}).map(([k,v])=>`<code>${k}</code> ${v}`).join('　');
+}
+
+// ---- グラフ ----
+let chart;
+function buildChart(years){
+  const labels=D.labels;
+  let start=0;
+  if(years>0){ start=Math.max(0, labels.length - years*12); }
+  const L=labels.slice(start);
+  const datasets=D.series.map(s=>({
+    label:s.label, borderColor:s.color, backgroundColor:s.color,
+    data:s.data.slice(start),
+    stepped: s.id==='hendo' ? 'after' : false,   // 変動は階段状
+    spanGaps:true, tension:0, borderWidth:2.4,
+    pointRadius:0, pointHoverRadius:4, hidden:false, _id:s.id,
+  }));
+  const cfg={
+    type:'line',
+    data:{labels:L, datasets},
+    options:{
+      responsive:false, maintainAspectRatio:false, animation:false,
+      interaction:{mode:'index', intersect:false},
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          callbacks:{
+            title:(it)=>it[0].label+'（時点）',
+            label:(c)=> c.dataset.label+': '+(c.parsed.y!=null? c.parsed.y.toFixed(3)+'%':'—')
+          }
+        }
+      },
+      scales:{
+        x:{ grid:{display:false},
+            ticks:{autoSkip:true, maxTicksLimit:14, maxRotation:0, minRotation:0,
+                   callback:function(v){ const s=this.getLabelForValue(v);
+                     // 期間が長いときは各年の1月だけラベル表示、短いときは全部
+                     return (L.length>36 && !s.endsWith('-01')) ? '' : s; }}
+        },
+        y:{ grid:{color:'#eef1f5'},
+            ticks:{callback:v=>v.toFixed(1)+'%'},
+            title:{display:true, text:'金利(年%)'} }
+      }
+    }
+  };
+  if(chart){ chart.data=cfg.data; chart.options=cfg.options; }
+  else { chart=new Chart(document.getElementById('chart'), cfg); }
+  fitChart();
+  applyToggles();
+}
+// 手動サイズ指定(環境に依存せず確実に描画するため)
+function fitChart(){
+  if(!chart) return;
+  const box=document.querySelector('.chartbox');
+  const w=box.clientWidth||box.offsetWidth||900;
+  chart.resize(w, 420);
+  chart.update('none');
+}
+window.addEventListener('resize', fitChart);
+function applyToggles(){
+  if(!chart) return;
+  const on={hendo:document.getElementById('tg-hendo').checked,
+            flat:document.getElementById('tg-flat').checked};
+  chart.data.datasets.forEach(ds=>{
+    ds.hidden = (ds._id==='hendo'&&!on.hendo)||(ds._id==='flat35'&&!on.flat);
+  });
+  chart.update();
+}
+
+if(D){
+  buildChart(0);
+  document.querySelectorAll('button.range').forEach(b=>{
+    b.addEventListener('click',()=>{
+      document.querySelectorAll('button.range').forEach(x=>x.classList.remove('active'));
+      b.classList.add('active');
+      buildChart(+b.dataset.years);
+    });
+  });
+  document.getElementById('tg-hendo').addEventListener('change', applyToggles);
+  document.getElementById('tg-flat').addEventListener('change', applyToggles);
+}
+</script>
+</body>
+</html>
