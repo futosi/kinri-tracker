@@ -40,6 +40,8 @@ UA = {"User-Agent": "Mozilla/5.0 (kinri-tracker; personal use)"}
 
 BOJ_URL = "https://www.boj.or.jp/statistics/dl/loan/prime/prime.htm"
 FLAT35_URL = "https://www.flat35.com/"
+# フラット35 最頻金利の月次推移表(借入21年以上・融資率9割以下)。プレーンHTMLで全履歴を掲載。
+FLAT35_HISTORY_URL = "https://lifeplan-fp.com/flat35.html"
 
 
 # --------------------------------------------------------------------------
@@ -159,6 +161,37 @@ def fetch_flat35_current():
     return {"month": month, "rate": rate, "all_numbers": nums, "hatsu5_rate": hatsu5}
 
 
+def fetch_flat35_history():
+    """
+    フラット35 最頻金利の月次推移表(借入21年以上・融資率9割以下)を丸ごと取得。
+    プレーンHTMLの表(列: 借入年月 / 金利範囲 / 最頻金利)から全履歴を抽出。
+    戻り値: dict {'YYYY-MM': 最頻金利(float)}
+    """
+    r = requests.get(FLAT35_HISTORY_URL, headers=UA, timeout=25)
+    r.raise_for_status()
+    r.encoding = r.apparent_encoding or "utf-8"
+    soup = BeautifulSoup(r.text, "lxml")
+    table = soup.find("table")
+    if table is None:
+        raise RuntimeError("flat35推移表: 表が見つかりません(構造変更の可能性)")
+
+    hist = {}
+    for tr in table.find_all("tr"):
+        cells = [z2h(c.get_text(" ", strip=True)) for c in tr.find_all(["th", "td"])]
+        if len(cells) < 3:
+            continue
+        d = re.search(r"(\d{4})\D+?(\d{1,2})\D*月", cells[0])
+        m = re.search(r"(\d+\.\d{2})", cells[2])   # 3列目 = 最頻金利
+        if d and m:
+            val = float(m.group(1))
+            if 0.3 <= val <= 6.0:
+                hist[f"{int(d.group(1)):04d}-{int(d.group(2)):02d}"] = val
+
+    if len(hist) < 12:
+        raise RuntimeError(f"flat35推移表: 抽出件数が少なすぎます({len(hist)}件)")
+    return hist
+
+
 # --------------------------------------------------------------------------
 # メイン
 # --------------------------------------------------------------------------
@@ -194,24 +227,41 @@ def main():
         hendo_data = [old_map.get(mth) for mth in labels]
         hendo_changes = old.get("changes", [])
 
-    # --- フラット35 -------------------------------------------------------
+    # --- フラット35(月次) ------------------------------------------------
+    # 土台: シード(オフライン/障害時のフォールバック用の月次スナップショット)
     seed = load_json(BASE / "seed_flat35.json", {"rates": {}}).get("rates", {})
     flat_map = {k: float(v) for k, v in seed.items()}
     flat_meta = {}
+
+    # (a) 推移表から月次フル履歴を取得して上書き(毎回組み直す=自己修復)
     try:
-        cur = fetch_flat35_current()
-        flat_map[cur["month"]] = cur["rate"]       # 当月を実測で上書き
-        flat_meta = {"scraped_month": cur["month"], "scraped_rate": cur["rate"],
-                     "当初5年": cur["hatsu5_rate"], "raw": cur["all_numbers"]}
-        status["flat35"] = (f"OK (当月 {cur['month']} = {cur['rate']}%, "
-                            f"抽出値 {cur['all_numbers']})")
+        hist = fetch_flat35_history()
+        flat_map.update(hist)
+        status["flat35_history"] = f"OK (月次推移表 {len(hist)}件, 最新 {max(hist)})"
     except Exception as e:
-        status["flat35"] = f"当月の自動取得に失敗(シード値のみ表示): {e}"
-        # 前回スクレイプ値があれば温存
-        old = prev_series.get("flat35", {})
+        status["flat35_history"] = f"推移表の取得に失敗(シード+前回値を使用): {e}"
+        old = prev_series.get("flat35", {})   # 前回値を温存
         for mth, v in zip(prev.get("labels", []), old.get("data", [])):
             if v is not None and mth not in flat_map:
                 flat_map[mth] = v
+
+    # (b) 当月がまだ推移表に無ければ flat35.com の当月値で補完(最速反映)
+    cm = current_month()
+    if cm not in flat_map:
+        try:
+            cur = fetch_flat35_current()
+            # 直近既知値から極端に外れていなければ採用(誤抽出ガード)
+            recent = [flat_map[k] for k in sorted(flat_map)[-3:]] if flat_map else []
+            ref = recent[-1] if recent else cur["rate"]
+            if abs(cur["rate"] - ref) <= 1.0:
+                flat_map[cur["month"]] = cur["rate"]
+                flat_meta = {"scraped_month": cur["month"], "scraped_rate": cur["rate"]}
+                status["flat35_current"] = f"OK (当月 {cur['month']} = {cur['rate']}% をflat35.comから補完)"
+            else:
+                status["flat35_current"] = f"当月値 {cur['rate']}% は直近{ref}%と乖離のため不採用"
+        except Exception as e:
+            status["flat35_current"] = f"当月の即時補完に失敗(推移表待ち): {e}"
+
     flat_data = [flat_map.get(mth) for mth in labels]
 
     # --- 出力 -------------------------------------------------------------
@@ -233,10 +283,10 @@ def main():
                 "id": "flat35",
                 "label": "フラット35(最頻金利)",
                 "color": "#1c7ed6",
-                "source": "住宅金融支援機構 flat35.com(当月) + 参考シード(過去)",
-                "url": FLAT35_URL,
-                "note": ("借入21年以上・融資率9割以下・団信込みの最頻金利。"
-                         "過去分は参考値(seed_flat35.jsonで編集可)、当月は自動取得。"),
+                "source": "フラット35 最頻金利の月次推移(借入21年以上・融資率9割以下)",
+                "url": FLAT35_HISTORY_URL,
+                "note": ("借入21年以上・融資率9割以下の最頻金利(月次)。"
+                         "推移表から毎回全履歴を取り込み、当月は必要に応じ flat35.com で補完。"),
                 "data": flat_data,
                 "meta": flat_meta,
             },
